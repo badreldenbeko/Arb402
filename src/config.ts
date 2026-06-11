@@ -151,3 +151,26 @@ export const RECOVERY_INTERVAL_MS = parseInt(
   process.env.RECOVERY_INTERVAL_MS || "300000",
   10
 );
+
+// a payment still incomplete this long after creation is almost certainly a
+// zombie (e.g. an incoming signed but never broadcast, whose nonce was reused).
+// The recovery worker logs an alert so an operator can review/prune. Default 1h.
+export const STUCK_PAYMENT_ALERT_MS = parseInt(
+  process.env.STUCK_PAYMENT_ALERT_MS || "3600000",
+  10
+);
+
+// minimum facilitator ETH balance (wei) required to attempt a settlement.
+// Gas is paid in ETH while fees accrue in USDC, so without a preflight the
+// wallet can silently run dry mid-settlement. Default 0.0005 ETH.
+export const MIN_FACILITATOR_ETH_WEI = BigInt(
+  process.env.MIN_FACILITATOR_ETH_WEI || "500000000000000"
+);
+
+// when true (default), settlement is bound to a requirement the facilitator
+// actually issued (anti-replay / anti-tamper: the nonce must be one we handed
+// out and the signed amount/deadline/merchant must match it). This is integrity,
+// not merchant-authoritative pricing. Set "false" for the advisory x402 model
+// where the resource server alone enforces price.
+export const REQUIRE_ISSUED_REQUIREMENTS =
+  (process.env.REQUIRE_ISSUED_REQUIREMENTS || "true").toLowerCase() !== "false";

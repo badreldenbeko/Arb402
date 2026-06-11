@@ -73,9 +73,26 @@ CREATE TABLE IF NOT EXISTS payments (
   status        TEXT NOT NULL DEFAULT 'pending',
   incoming_tx_hash TEXT,
   outgoing_tx_hash TEXT,
+  -- crash-safety: both legs are signed and persisted BEFORE broadcast so recovery
+  -- can re-check / re-broadcast the exact same tx (idempotent) rather than
+  -- building a new one and risking a double-payment (outgoing) or a zombie row
+  -- that can only be polled (incoming).
+  incoming_account_nonce BIGINT,
+  incoming_raw_tx TEXT,
+  outgoing_account_nonce BIGINT,
+  outgoing_raw_tx TEXT,
+  -- recovery claim marker (set when a worker takes ownership of a row)
+  recovery_locked_at TIMESTAMPTZ,
   created_at    TIMESTAMPTZ NOT NULL DEFAULT NOW(),
   updated_at    TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
+
+-- migrations for existing deployments (no-ops if the columns already exist)
+ALTER TABLE payments ADD COLUMN IF NOT EXISTS incoming_account_nonce BIGINT;
+ALTER TABLE payments ADD COLUMN IF NOT EXISTS incoming_raw_tx TEXT;
+ALTER TABLE payments ADD COLUMN IF NOT EXISTS outgoing_account_nonce BIGINT;
+ALTER TABLE payments ADD COLUMN IF NOT EXISTS outgoing_raw_tx TEXT;
+ALTER TABLE payments ADD COLUMN IF NOT EXISTS recovery_locked_at TIMESTAMPTZ;
 
 CREATE TABLE IF NOT EXISTS payment_events (
   id            SERIAL PRIMARY KEY,
@@ -88,6 +105,9 @@ CREATE TABLE IF NOT EXISTS payment_events (
 CREATE TABLE IF NOT EXISTS merchants (
   address       TEXT PRIMARY KEY,
   name          TEXT NOT NULL,
+  -- key_id is the public prefix of the API key; auth looks the merchant up by it
+  -- so only ONE bcrypt.compare runs per request (not one per merchant).
+  key_id        TEXT,
   api_key_hash  TEXT NOT NULL,
   enabled       BOOLEAN NOT NULL DEFAULT true,
   rate_limit    INTEGER DEFAULT 50,
@@ -95,9 +115,24 @@ CREATE TABLE IF NOT EXISTS merchants (
   updated_at    TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
+ALTER TABLE merchants ADD COLUMN IF NOT EXISTS key_id TEXT;
+
+-- requirements the facilitator has issued, so settlement can be bound to the
+-- server's quoted nonce/amount/deadline (not the client's own reconstruction).
+CREATE TABLE IF NOT EXISTS issued_requirements (
+  nonce            TEXT PRIMARY KEY,
+  amount           TEXT NOT NULL,
+  merchant_address TEXT,
+  deadline         BIGINT NOT NULL,
+  network          TEXT NOT NULL,
+  created_at       TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
 CREATE INDEX IF NOT EXISTS idx_payments_status ON payments(status);
 CREATE INDEX IF NOT EXISTS idx_payments_merchant ON payments(merchant_address);
 CREATE INDEX IF NOT EXISTS idx_payment_events_nonce ON payment_events(nonce);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_merchants_key_id ON merchants(key_id);
+CREATE INDEX IF NOT EXISTS idx_issued_requirements_created ON issued_requirements(created_at);
 `;
 
 export async function ensureSchema(): Promise<void> {

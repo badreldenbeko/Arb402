@@ -1,7 +1,7 @@
 import type { Request, Response, NextFunction } from "express";
 import bcrypt from "bcrypt";
 import crypto from "node:crypto";
-import { getAllMerchants, type Merchant } from "./merchantStore.js";
+import { getMerchantByKeyId, type Merchant } from "./merchantStore.js";
 import { logger } from "./logging.js";
 
 export interface AuthenticatedRequest extends Request {
@@ -9,23 +9,29 @@ export interface AuthenticatedRequest extends Request {
   isAdmin?: boolean;
 }
 
-// cache merchants for 60s to avoid hitting DB on every request
-let merchantCache: Merchant[] = [];
-let cacheUpdatedAt = 0;
-const CACHE_TTL = 60_000;
+// API key format: "<keyId>.<secret>". The keyId is a public prefix used to look
+// up the single matching merchant, so authentication runs exactly ONE
+// bcrypt.compare instead of scanning every merchant's hash.
+export function apiKeyId(key: string): string | null {
+  const dot = key.indexOf(".");
+  if (dot <= 0) return null;
+  return key.slice(0, dot);
+}
 
-async function refreshCache(): Promise<Merchant[]> {
-  const now = Date.now();
-  if (now - cacheUpdatedAt < CACHE_TTL && merchantCache.length > 0) {
-    return merchantCache;
-  }
-  try {
-    merchantCache = await getAllMerchants();
-    cacheUpdatedAt = now;
-  } catch (err) {
-    logger.warn("failed to refresh merchant cache, using stale data");
-  }
-  return merchantCache;
+// dev/test single-merchant fallback — lets the facilitator settle without a
+// database (e.g. the local hardhat harness). Active ONLY when both env vars are
+// set; never configure these in production.
+function devMerchant(): Merchant | null {
+  const apiKeyHash = process.env.DEV_MERCHANT_API_KEY_HASH;
+  const address = process.env.DEV_MERCHANT_ADDRESS;
+  if (!apiKeyHash || !address) return null;
+  return {
+    address,
+    name: "dev-merchant",
+    apiKeyHash,
+    enabled: true,
+    rateLimit: 1000,
+  };
 }
 
 export function authenticateMerchant(
@@ -39,21 +45,31 @@ export function authenticateMerchant(
     return;
   }
 
-  refreshCache()
-    .then(async (merchants) => {
-      for (const m of merchants) {
-        if (!m.enabled) continue;
-        const match = await bcrypt.compare(apiKey, m.apiKeyHash);
-        if (match) {
-          req.merchant = m;
-          return next();
-        }
+  (async () => {
+    // O(1): resolve the candidate merchant by the key's public prefix, plus the
+    // optional dev-merchant fallback. No fixed cache, so a disabled/rotated key
+    // stops working immediately.
+    const candidates: Merchant[] = [];
+    const keyId = apiKeyId(apiKey);
+    if (keyId) {
+      const m = await getMerchantByKeyId(keyId);
+      if (m) candidates.push(m);
+    }
+    const dev = devMerchant();
+    if (dev) candidates.push(dev);
+
+    for (const m of candidates) {
+      if (!m.enabled) continue;
+      if (await bcrypt.compare(apiKey, m.apiKeyHash)) {
+        req.merchant = m;
+        return next();
       }
-      res.status(403).json({ error: "invalid or disabled API key" });
-    })
-    .catch(() => {
-      res.status(500).json({ error: "auth check failed" });
-    });
+    }
+    res.status(403).json({ error: "invalid or disabled API key" });
+  })().catch((err) => {
+    logger.warn("merchant auth failed", { error: err?.message });
+    res.status(500).json({ error: "auth check failed" });
+  });
 }
 
 export function authenticateAdmin(
@@ -88,6 +104,10 @@ export async function hashApiKey(key: string): Promise<string> {
   return bcrypt.hash(key, 10);
 }
 
+// Generate an API key as "<keyId>.<secret>". The keyId is stored alongside the
+// merchant for O(1) lookup; the full key is what gets bcrypt-hashed.
 export function generateApiKey(): string {
-  return crypto.randomBytes(32).toString("hex");
+  const keyId = crypto.randomBytes(8).toString("hex"); // 16 hex chars
+  const secret = crypto.randomBytes(24).toString("hex"); // 48 hex chars
+  return `${keyId}.${secret}`;
 }

@@ -1,0 +1,19 @@
+{
+  "name": "arb402-harness",
+  "version": "0.1.0",
+  "description": "Reproducible on-chain test harness for the arb402 facilitator (local Hardhat node + EIP-3009 TestUSDC)",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "compile": "hardhat compile",
+    "node": "hardhat node",
+    "deploy": "tsx scripts/deploy.ts",
+    "harness": "tsx run.ts"
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "ethers": "^6.13.2",
+    "hardhat": "^2.22.10",
+    "tsx": "^4.19.0"
+  }
+}

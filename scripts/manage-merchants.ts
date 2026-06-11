@@ -26,16 +26,16 @@ async function main() {
     }
 
     case "add": {
-      const [address, name, apiKeyHash] = args;
-      if (!address || !name || !apiKeyHash) {
-        console.log("  usage: merchants add <address> <name> <apiKeyHash>");
+      const [address, name, keyId, apiKeyHash] = args;
+      if (!address || !name || !keyId || !apiKeyHash) {
+        console.log("  usage: merchants add <address> <name> <keyId> <apiKeyHash>");
         process.exit(1);
       }
       if (!/^0x[a-fA-F0-9]{40}$/.test(address)) {
         console.log("  error: invalid address format (expected 0x + 40 hex chars)");
         process.exit(1);
       }
-      await addMerchant(address, name, apiKeyHash);
+      await addMerchant(address, name, apiKeyHash, keyId);
       console.log(`  added merchant ${name} (${address})`);
       break;
     }

@@ -80,8 +80,8 @@ describe("nonceStore (in-memory mode)", () => {
     expect(payment).toBeNull();
   });
 
-  it("getIncompletePayments returns empty in memory mode", async () => {
-    const incomplete = await store.getIncompletePayments();
+  it("claimIncompletePayments returns empty in memory mode", async () => {
+    const incomplete = await store.claimIncompletePayments();
     expect(incomplete).toEqual([]);
   });
 

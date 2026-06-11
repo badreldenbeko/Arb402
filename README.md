@@ -132,6 +132,16 @@ npm start
 
 Requires PostgreSQL with `DATABASE_URL` set. Schema is created automatically on first boot.
 
+> **Scaling — one settlement process per facilitator wallet.** Transaction
+> submission is serialized by an in-process mutex + nonce manager, which is
+> what prevents concurrent settlements from colliding on the wallet's account
+> nonce. The **recovery worker** is safe to run on multiple instances (it claims
+> rows with `FOR UPDATE SKIP LOCKED`), but **settlement** is not: two replicas
+> sharing one `EVM_PRIVATE_KEY` would reintroduce the nonce collision. Run a
+> single settlement process per wallet (scale by using separate wallets, or put
+> a queue in front), and behind a proxy set `TRUST_PROXY` so rate limits key on
+> the real client IP.
+
 ## Networks
 
 | Network | CAIP-2 | Chain ID | USDC |

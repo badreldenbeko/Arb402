@@ -23,8 +23,13 @@ export interface PaymentRecord {
   status: PaymentStatus;
   incomingTxHash?: string;
   outgoingTxHash?: string;
+  incomingRawTx?: string;
+  outgoingAccountNonce?: string;
+  outgoingRawTx?: string;
   createdAt: Date;
 }
+
+const TERMINAL_STATUSES: PaymentStatus[] = ["complete", "failed", "refunded"];
 
 // advisory lock key from nonce hash
 function lockKey(nonce: string): string {
@@ -110,7 +115,62 @@ export async function setStatus(
     vals.push(extra.feeAmount);
   }
 
+  // releasing the row when it reaches a terminal state lets recovery move on
+  if (TERMINAL_STATUSES.includes(status)) {
+    sets.push("recovery_locked_at = NULL");
+  }
+
   await query(`UPDATE payments SET ${sets.join(", ")} WHERE nonce = $1`, vals);
+}
+
+// Persist the signed INCOMING transfer BEFORE broadcast, including the raw tx, so
+// recovery can re-broadcast the exact same tx if it was signed but never sent
+// (rather than polling a hash that will never appear). EIP-3009 keeps the pull
+// itself idempotent on-chain.
+export async function recordIncomingIntent(
+  nonce: string,
+  txHash: string,
+  accountNonce: number,
+  rawTx: string,
+  merchantAmount: string,
+  feeAmount: string
+): Promise<void> {
+  if (!isDatabaseConfigured()) return;
+  await query(
+    `UPDATE payments
+     SET status = 'incoming_submitted',
+         incoming_tx_hash = $2,
+         incoming_account_nonce = $3,
+         incoming_raw_tx = $4,
+         merchant_amount = $5,
+         fee_amount = $6,
+         updated_at = NOW()
+     WHERE nonce = $1`,
+    [nonce, txHash, accountNonce, rawTx, merchantAmount, feeAmount]
+  );
+}
+
+// Persist the signed outgoing transfer BEFORE it is broadcast. Recovery uses the
+// stored raw tx to re-broadcast the EXACT same transaction (same account nonce →
+// same hash), which makes the outgoing leg idempotent: a duplicate can never be
+// mined because the second send reuses an already-consumed account nonce.
+export async function recordOutgoingIntent(
+  nonce: string,
+  txHash: string,
+  accountNonce: number,
+  rawTx: string
+): Promise<void> {
+  if (!isDatabaseConfigured()) return;
+  await query(
+    `UPDATE payments
+     SET status = 'outgoing_submitted',
+         outgoing_tx_hash = $2,
+         outgoing_account_nonce = $3,
+         outgoing_raw_tx = $4,
+         updated_at = NOW()
+     WHERE nonce = $1`,
+    [nonce, txHash, accountNonce, rawTx]
+  );
 }
 
 function toRecord(r: any): PaymentRecord {
@@ -126,6 +186,12 @@ function toRecord(r: any): PaymentRecord {
     status: r.status,
     incomingTxHash: r.incoming_tx_hash,
     outgoingTxHash: r.outgoing_tx_hash,
+    incomingRawTx: r.incoming_raw_tx ?? undefined,
+    outgoingAccountNonce:
+      r.outgoing_account_nonce === null || r.outgoing_account_nonce === undefined
+        ? undefined
+        : String(r.outgoing_account_nonce),
+    outgoingRawTx: r.outgoing_raw_tx ?? undefined,
     createdAt: r.created_at,
   };
 }
@@ -138,13 +204,50 @@ export async function getPayment(nonce: string): Promise<PaymentRecord | null> {
   return toRecord(res.rows[0]);
 }
 
-export async function getIncompletePayments(): Promise<PaymentRecord[]> {
+// Atomically CLAIM incomplete payments for recovery. `FOR UPDATE SKIP LOCKED`
+// lets multiple workers/instances run concurrently without ever grabbing the
+// same row, and `recovery_locked_at` keeps a claimed row off-limits to other
+// cycles until it goes stale (so a crashed worker's rows are eventually retried).
+export async function claimIncompletePayments(
+  staleMs = 2 * 60_000,
+  limit = 50
+): Promise<PaymentRecord[]> {
+  if (!isDatabaseConfigured()) return [];
+
+  const res = await query(
+    `UPDATE payments
+       SET recovery_locked_at = NOW(), updated_at = NOW()
+     WHERE nonce IN (
+       SELECT nonce FROM payments
+       WHERE status IN ('incoming_submitted', 'incoming_complete', 'outgoing_submitted')
+         AND (recovery_locked_at IS NULL
+              OR recovery_locked_at < NOW() - ($1 || ' milliseconds')::interval)
+       ORDER BY created_at ASC
+       FOR UPDATE SKIP LOCKED
+       LIMIT $2
+     )
+     RETURNING *`,
+    [String(staleMs), limit]
+  );
+  return res.rows.map(toRecord);
+}
+
+// Payments still incomplete well past the point where normal recovery should
+// have resolved them — surfaced for operator review/pruning (e.g. a zombie
+// incoming whose nonce was reused and can no longer be re-broadcast).
+export async function getStuckPayments(
+  olderThanMs: number,
+  limit = 100
+): Promise<PaymentRecord[]> {
   if (!isDatabaseConfigured()) return [];
 
   const res = await query(
     `SELECT * FROM payments
-     WHERE status IN ('incoming_complete', 'outgoing_submitted')
-     ORDER BY created_at ASC`
+     WHERE status IN ('incoming_submitted', 'incoming_complete', 'outgoing_submitted')
+       AND created_at < NOW() - ($1 || ' milliseconds')::interval
+     ORDER BY created_at ASC
+     LIMIT $2`,
+    [String(olderThanMs), limit]
   );
   return res.rows.map(toRecord);
 }

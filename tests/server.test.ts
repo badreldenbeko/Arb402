@@ -248,6 +248,29 @@ describe("POST /verify", () => {
       });
     expect(res.status).toBe(400);
   });
+
+  it("rejects a non-numeric amount instead of throwing in BigInt", async () => {
+    const res = await request(app)
+      .post("/verify")
+      .send({
+        x402Version: 2,
+        network: "eip155:421614",
+        token: "0x75faf114eafb1BDbe2F0316DF893fd58CE46AA4d",
+        recipient: "0x1234567890123456789012345678901234567890",
+        amount: "abc", // not a decimal string
+        nonce: "0x" + "ab".repeat(32),
+        deadline: Math.floor(Date.now() / 1000) + 3600,
+        permit: {
+          owner: "0x1234567890123456789012345678901234567890",
+          spender: "0x1234567890123456789012345678901234567890",
+          value: "1000000",
+          deadline: Math.floor(Date.now() / 1000) + 3600,
+          sig: "0x" + "11".repeat(65),
+        },
+      });
+    expect(res.status).toBe(400);
+    expect(res.body.error).toBe("invalid payload");
+  });
 });
 
 describe("404 handler", () => {

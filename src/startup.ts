@@ -13,6 +13,13 @@ export async function runStartupChecks(): Promise<void> {
     await testConnection();
     await ensureSchema();
   } else {
+    // the in-memory nonce store grows unbounded and is lost on restart, so it is
+    // unsafe for production — refuse to boot rather than silently risk replays.
+    if (process.env.NODE_ENV === "production") {
+      throw new Error(
+        "DATABASE_URL is required in production (the in-memory nonce store is unsafe)"
+      );
+    }
     logger.warn(
       "DATABASE_URL not set — running without persistence. nonces will be lost on restart."
     );

@@ -91,13 +91,18 @@ export interface PaymentRequirementsResponse {
   accepts: PaymentRequirementsAccepts[];
 }
 
+// numeric fields are validated as decimal-integer strings so that downstream
+// BigInt() calls can never throw on malformed input (which, in an async handler,
+// would otherwise hang the request — Express 4 does not catch async rejections).
+const decimalString = z.string().regex(/^\d+$/, "must be a decimal integer string");
+
 export const SDKVerifyRequestSchema = z.object({
   x402Version: z.number(),
   network: z.string(),
   token: z.string(),
   recipient: z.string(),
-  amount: z.string(),
-  nonce: z.string(),
+  amount: decimalString,
+  nonce: z.string().regex(/^0x[0-9a-fA-F]{64}$/, "nonce must be 32-byte hex"),
   deadline: z.number(),
   memo: z.string().optional(),
   extra: z
@@ -107,7 +112,7 @@ export const SDKVerifyRequestSchema = z.object({
   permit: z.object({
     owner: z.string(),
     spender: z.string(),
-    value: z.string(),
+    value: decimalString,
     deadline: z.number(),
     sig: z.string(),
   }),

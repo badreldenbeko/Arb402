@@ -96,9 +96,10 @@ export async function verifyTransferAuthorization(
     ])
   );
 
-  // basic validity checks
-  const v = sig.v;
-  if (v !== 27 && v !== 28) throw new Error(`invalid v value: ${v}`);
+  // basic validity checks — accept both {0,1} and {27,28} encodings for interop
+  let v = sig.v;
+  if (v === 0 || v === 1) v += 27;
+  if (v !== 27 && v !== 28) throw new Error(`invalid v value: ${sig.v}`);
 
   const sBn = BigInt(sig.s);
   if (sBn === 0n || sBn > SECP256K1_HALF_N) {

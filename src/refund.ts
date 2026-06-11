@@ -1,5 +1,5 @@
 import { getPayment, setStatus, logEvent } from "./nonceStore.js";
-import { transferUsdc } from "./settle.js";
+import { transferUsdc, getPublicClient } from "./settle.js";
 import { logger } from "./logging.js";
 
 export async function executeRefund(
@@ -28,6 +28,25 @@ export async function executeRefund(
     return {
       success: false,
       error: "outgoing tx exists — merchant already received funds",
+    };
+  }
+
+  // On-chain guard: the `outgoing_tx_hash` flag alone isn't enough — confirm the
+  // incoming transfer actually landed (so there are funds to refund) and that no
+  // outgoing tx was mined for this payment. This closes the window where a
+  // timed-out-but-confirmed outgoing left the row `failed` with a null hash.
+  const pub = getPublicClient();
+  try {
+    const incoming = await pub.getTransactionReceipt({
+      hash: payment.incomingTxHash as `0x${string}`,
+    });
+    if (incoming.status !== "success") {
+      return { success: false, error: "incoming tx did not confirm — nothing to refund" };
+    }
+  } catch {
+    return {
+      success: false,
+      error: "could not confirm incoming tx on-chain — refusing to refund",
     };
   }
 

@@ -4,6 +4,7 @@ import {
   FACILITATOR_ADDRESS,
   SERVICE_FEE_BPS,
   GAS_FEE_USDC,
+  MAX_SETTLEMENT_AMOUNT,
   USDC_NAME,
   USDC_VERSION,
 } from "./config.js";
@@ -94,9 +95,10 @@ export async function verifyPayment(
     };
   }
 
-  // check amount covers gas at minimum
-  if (amount < GAS_FEE_USDC) {
-    return { valid: false, invalidReason: "amount doesn't cover gas fee" };
+  // amount must exceed the gas fee — equal would leave the merchant with 0 and
+  // waste an on-chain transfer
+  if (amount <= GAS_FEE_USDC) {
+    return { valid: false, invalidReason: "amount must exceed the gas fee" };
   }
 
   // time window
@@ -108,22 +110,9 @@ export async function verifyPayment(
     return { valid: false, invalidReason: "authorization expired" };
   }
 
-  // nonce uniqueness — only register during settlement, not verify-only calls
-  if (shouldRegisterNonce) {
-    const isNew = await registerNonce(
-      payload.payload.nonce,
-      payload.payload.from,
-      merchantAddress || requirements.merchantAddress || "",
-      requirements.token,
-      payload.network,
-      payload.payload.value
-    );
-    if (!isNew) {
-      return { valid: false, invalidReason: "nonce already used" };
-    }
-  }
-
-  // signature verification
+  // signature verification — done BEFORE claiming the nonce so that a bad
+  // signature (or wrong signer) can never permanently burn a legitimate
+  // payer's authorization in the DB.
   try {
     const recovered = await verifyTransferAuthorization(
       {
@@ -150,6 +139,31 @@ export async function verifyPayment(
   } catch (err: any) {
     log.error("signature verification failed", { error: err.message });
     return { valid: false, invalidReason: `bad signature: ${err.message}` };
+  }
+
+  // settlement cap — also checked before claiming the nonce, so an over-cap
+  // request doesn't burn the nonce with no on-chain action taken.
+  if (amount > MAX_SETTLEMENT_AMOUNT) {
+    return {
+      valid: false,
+      invalidReason: `exceeds max settlement (${MAX_SETTLEMENT_AMOUNT})`,
+    };
+  }
+
+  // nonce uniqueness — claimed only after signature + cap pass; verify-only
+  // calls (registerNonce:false) never claim it.
+  if (shouldRegisterNonce) {
+    const isNew = await registerNonce(
+      payload.payload.nonce,
+      payload.payload.from,
+      merchantAddress || requirements.merchantAddress || "",
+      requirements.token,
+      payload.network,
+      payload.payload.value
+    );
+    if (!isNew) {
+      return { valid: false, invalidReason: "nonce already used" };
+    }
   }
 
   const fees = calculateFees(amount);
