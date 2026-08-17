@@ -41,25 +41,56 @@ If the outgoing transfer fails after the incoming succeeds, a background recover
 ```
 src/
   server.ts          express app, routes, middleware
-  config.ts          network config, env parsing, fee constants
-  provider.ts        viem public client singleton
+  chains.ts          chain registry — One, Nova, and Orbit chains as data
+  config.ts          env parsing, active-network resolution, fee constants
   types.ts           shared interfaces + zod schemas
   eip3009.ts         EIP-712 digest construction, signature verification
+  tokenProbe.ts      on-chain EIP-3009 + EIP-712 domain verification
+  requirements.ts    402 payment requirement generation
   verify.ts          payment validation logic, fee calculation
   settle.ts          on-chain settlement (incoming + outgoing transfers)
   refund.ts          admin refund for failed payments
   recovery.ts        background worker that retries stuck outgoing transfers
-  startup.ts         boot-time checks (DB, chain ID, USDC decimals)
+  startup.ts         boot-time checks (DB, chain ID, settlement token)
   auth.ts            merchant + admin API key authentication (bcrypt)
   nonceStore.ts      nonce tracking, payment state machine, DB operations
+  issuedStore.ts     records issued requirements so /settle can bind to a quote
   merchantStore.ts   merchant CRUD
   logging.ts         structured logger with correlation IDs
   db.ts              postgres pool, schema, transactions
 
+  cli/               the arb402 binary
+    index.ts         command registration
+    commands/        init, config, chains, doctor, wallet, keygen, serve, merchant
+
 scripts/
   generate-api-key.ts    generate a merchant API key + bcrypt hash
-  manage-merchants.ts    CLI to add/list/enable/disable/delete merchants
+  manage-merchants.ts    add/list/enable/disable/delete merchants
 ```
+
+## CLI
+
+```bash
+npx arb402 <command>      # installed
+npm run cli -- <command>  # from a clone
+```
+
+| Command | Description |
+|---|---|
+| `init [--network <id>] [--force]` | Scaffold a `.env` for a chain |
+| `config` | Print the resolved configuration |
+| `chains [--verify]` | List registered chains; `--verify` probes each token on-chain |
+| `doctor` | Deployment-readiness checks; non-zero exit on failure |
+| `wallet` | Facilitator address and on-chain balances |
+| `keygen [--admin]` | Generate an API key + bcrypt hash |
+| `dev` / `start` | Run the facilitator from source / from `dist` |
+| `merchant create <address> <name>` | Generate a key, register the merchant, print the key once |
+| `merchant add <address> <name> <keyId> <hash>` | Register with a pre-generated key |
+| `merchant list` | List merchants |
+| `merchant enable\|disable <address>` | Toggle a merchant |
+| `merchant delete <address>` | Remove a merchant |
+
+Full options and output in the [CLI reference](./docs/cli.md).
 
 ## API
 
@@ -71,7 +102,10 @@ scripts/
 | POST | `/verify` | none | Validate a payment without settling |
 | POST | `/settle` | merchant | Verify + execute on-chain settlement |
 | GET | `/admin/wallet` | admin | Facilitator USDC + ETH balances |
+| GET | `/admin/stuck` | admin | Payments incomplete past the alert threshold |
 | POST | `/admin/refund` | admin | Refund a failed payment to the user |
+
+Request and response schemas in the [API reference](./docs/api.md).
 
 ## Fee model
 
@@ -99,11 +133,12 @@ The recovery worker picks up payments stuck at `incoming_complete` or `outgoing_
 ## Setup
 
 ```bash
-cp .env.example .env
-# fill in EVM_PRIVATE_KEY and optionally DATABASE_URL
-
 npm install
-npm run dev
+npx arb402 init --network arbitrum-sepolia
+# set EVM_PRIVATE_KEY in .env (and DATABASE_URL for anything but local dev)
+
+npx arb402 doctor    # verifies RPC, chain id, and the settlement token
+npx arb402 dev
 ```
 
 Without `DATABASE_URL`, the server runs with in-memory nonce tracking (fine for dev, unsafe for production — nonces are lost on restart).
@@ -111,26 +146,25 @@ Without `DATABASE_URL`, the server runs with in-memory nonce tracking (fine for 
 ### Merchant registration
 
 ```bash
-# generate a key pair
-npm run generate-api-key
-# output: API key (give to merchant) + hash (store in DB)
-
-# register the merchant
-npm run merchants -- add 0xMerchantAddress "MerchantName" '<hash>'
+# generate a key, register the merchant, print the key once
+npx arb402 merchant create 0xMerchantAddress "MerchantName"
 
 # list, enable, disable, delete
-npm run merchants -- list
-npm run merchants -- disable 0xMerchantAddress
+npx arb402 merchant list
+npx arb402 merchant disable 0xMerchantAddress
 ```
+
+Merchant commands require `DATABASE_URL`. Use `arb402 keygen` + `arb402 merchant add` when the key must be generated somewhere other than the machine holding the database.
 
 ### Production
 
 ```bash
 npm run build
-npm start
+NODE_ENV=production npx arb402 doctor    # gate: non-zero exit on any blocking issue
+NODE_ENV=production npx arb402 start
 ```
 
-Requires PostgreSQL with `DATABASE_URL` set. Schema is created automatically on first boot.
+Requires PostgreSQL with `DATABASE_URL` set. Schema is created automatically on first boot. See [deployment.md](./docs/deployment.md) for the full checklist.
 
 > **Scaling — one settlement process per facilitator wallet.** Transaction
 > submission is serialized by an in-process mutex + nonce manager, which is
@@ -144,10 +178,63 @@ Requires PostgreSQL with `DATABASE_URL` set. Schema is created automatically on 
 
 ## Networks
 
-| Network | CAIP-2 | Chain ID | USDC |
-|---------|--------|----------|------|
-| Arbitrum One | eip155:42161 | 42161 | 0xaf88d065e77c8cC2239327C5EDb3A432268e5831 |
-| Arbitrum Sepolia | eip155:421614 | 421614 | 0x75faf114eafb1BDbe2F0316DF893fd58CE46AA4d |
+Chains are data, not code. Three are built in; any Orbit (L3) chain is added by
+writing a JSON file — no fork, no rebuild.
+
+| Network | CAIP-2 | Chain ID | Settlement token |
+|---------|--------|----------|------------------|
+| Arbitrum One | eip155:42161 | 42161 | Native USDC `0xaf88d065e77c8cC2239327C5EDb3A432268e5831` |
+| Arbitrum Nova | eip155:42170 | 42170 | **none by default** — see below |
+| Arbitrum Sepolia | eip155:421614 | 421614 | Test USDC `0x75faf114eafb1BDbe2F0316DF893fd58CE46AA4d` |
+| Any Orbit chain | eip155:&lt;id&gt; | yours | yours, via `arb402.chains.json` |
+
+```bash
+arb402 chains --verify     # probe every chain's token on-chain
+```
+
+**Why Nova ships without a token.** Settlement is EIP-3009
+`transferWithAuthorization` — that is what makes the flow gasless for the payer.
+Nova's canonical stablecoin is *bridged* USDC.e (`0x750ba8…273b`), a plain
+Arbitrum gateway ERC-20: 6 decimals, the symbol `USDC`, even a
+`DOMAIN_SEPARATOR` — but `authorizationState` reverts and
+`transferWithAuthorization` does not exist. It cannot settle a single payment.
+Shipping it as a default would produce valid-looking signatures that revert
+on-chain, so Nova is fully supported *except* for a token you must supply:
+
+```bash
+NETWORK=arbitrum-nova
+USDC_ADDRESS=0xYourEip3009TokenOnNova
+```
+
+`arb402 doctor` then verifies that token really implements EIP-3009 and that its
+EIP-712 domain matches, before you rely on it. Same probe, same guarantee, for
+any Orbit chain. See [chains.md](./docs/chains.md).
+
+## Documentation
+
+| Guide | Covers |
+|---|---|
+| [Integration](./docs/integration.md) | Charging for an API, or paying for one |
+| [CLI reference](./docs/cli.md) | Every command, option, and exit code |
+| [API reference](./docs/api.md) | Every endpoint, schema, and error |
+| [Configuration](./docs/configuration.md) | Every environment variable |
+| [Chains](./docs/chains.md) | One, Nova, and Orbit onboarding |
+| [Deployment](./docs/deployment.md) | Production, scaling, monitoring, key rotation |
+
+Plus [templates](./templates) (four extensible starting points) and the
+[harness](./harness) (a deterministic local chain that settles every template
+end to end).
+
+## Tests
+
+```bash
+npm test                              # unit + integration
+cd harness && npm install && npm run harness   # real on-chain settlement, locally
+```
+
+## License
+
+MIT — see [LICENSE](./LICENSE).
 
 Both legacy names (`arbitrum`, `arbitrum-sepolia`) and CAIP-2 identifiers are accepted in the `NETWORK` env var and in API payloads.
 

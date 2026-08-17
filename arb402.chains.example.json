@@ -1,0 +1,62 @@
+{
+  "$comment": [
+    "arb402 Orbit chain registry — copy to arb402.chains.json (or point",
+    "ARB402_CHAINS_FILE at it) to run the facilitator on any Arbitrum L3.",
+    "",
+    "Entries are merged over the built-in chains by CAIP-2 id, so you can also",
+    "use this file to override a built-in — e.g. to give Arbitrum Nova the",
+    "EIP-3009 token you deployed, or to pin a private RPC for Arbitrum One.",
+    "",
+    "Run 'arb402 chains --verify' after editing: it probes each token on-chain",
+    "for EIP-3009 support and checks that the declared EIP-712 domain matches",
+    "the contract's own DOMAIN_SEPARATOR."
+  ],
+  "chains": [
+    {
+      "$comment": "A typical Orbit L3 with its own EIP-3009 USDC deployment.",
+      "name": "My Orbit Chain",
+      "slug": "my-orbit",
+      "chainId": 412346,
+      "rpcUrl": "https://rpc.my-orbit-chain.example",
+      "blockExplorer": "https://explorer.my-orbit-chain.example",
+      "testnet": true,
+      "aliases": ["orbit-dev"],
+      "nativeCurrency": { "name": "Ether", "symbol": "ETH", "decimals": 18 },
+      "token": {
+        "$comment": [
+          "Must implement EIP-3009 (transferWithAuthorization). 'name' and",
+          "'version' are the token's EIP-712 domain values, NOT cosmetic — if",
+          "they disagree with the contract, every signature recovers to the",
+          "wrong address and settlement fails with no on-chain explanation.",
+          "Default to Circle's ('USD Coin', '2') only if you deployed Circle's",
+          "implementation."
+        ],
+        "address": "0x0000000000000000000000000000000000000000",
+        "name": "USD Coin",
+        "version": "2",
+        "decimals": 6
+      }
+    },
+    {
+      "$comment": [
+        "Overriding a built-in: Arbitrum Nova's bridged USDC.e is a plain",
+        "gateway ERC-20 with no EIP-3009, so arb402 ships Nova with no default",
+        "token. Uncomment and point this at an EIP-3009-capable token to",
+        "enable settlement on Nova.",
+        "",
+        "  \"token\": {",
+        "    \"address\": \"0xYourEip3009TokenOnNova\",",
+        "    \"name\": \"USD Coin\",",
+        "    \"version\": \"2\",",
+        "    \"decimals\": 6",
+        "  }"
+      ],
+      "name": "Arbitrum Nova",
+      "slug": "arbitrum-nova",
+      "chainId": 42170,
+      "rpcUrl": "https://nova.arbitrum.io/rpc",
+      "blockExplorer": "https://nova.arbiscan.io",
+      "testnet": false
+    }
+  ]
+}

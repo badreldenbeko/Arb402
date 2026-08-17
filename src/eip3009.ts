@@ -27,7 +27,12 @@ const EIP712_DOMAIN_TYPEHASH = keccak256(
   )
 );
 
-function buildDomainSeparator(
+/**
+ * EIP-712 domain separator for an EIP-3009 token. Exported so tokenProbe can
+ * recompute it from the configured (name, version) and compare against the
+ * value the contract itself reports — a domain mismatch is otherwise silent.
+ */
+export function buildDomainSeparator(
   name: string,
   version: string,
   chainId: number,

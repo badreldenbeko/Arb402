@@ -1,58 +1,58 @@
 import dotenv from "dotenv";
-import { arbitrum, arbitrumSepolia } from "viem/chains";
 import { privateKeyToAccount } from "viem/accounts";
 import type { Chain } from "viem";
 import { logger } from "./logging.js";
+import {
+  Network,
+  DEFAULT_NETWORK,
+  getRegistry,
+  getChain,
+  resolveNetworkAlias,
+  toViemChain,
+  type ChainDefinition,
+  type ChainFamily,
+} from "./chains.js";
 
 dotenv.config();
 
-// CAIP-2 network identifiers
-export enum Network {
-  ARBITRUM = "eip155:42161",
-  ARBITRUM_SEPOLIA = "eip155:421614",
-}
+export { Network, DEFAULT_NETWORK };
+export type { ChainDefinition, ChainFamily };
 
-// legacy aliases
-const NETWORK_ALIASES: Record<string, Network> = {
-  arbitrum: Network.ARBITRUM,
-  "arbitrum-one": Network.ARBITRUM,
-  "arbitrum-sepolia": Network.ARBITRUM_SEPOLIA,
-};
-
-const LEGACY_NAMES: Record<Network, string> = {
-  [Network.ARBITRUM]: "arbitrum",
-  [Network.ARBITRUM_SEPOLIA]: "arbitrum-sepolia",
-};
-
+/**
+ * Resolve any accepted spelling of a network to its CAIP-2 id.
+ *
+ * Accepts the CAIP-2 id itself ("eip155:42170"), the legacy x402 v1 name
+ * ("arbitrum-nova"), or any registered alias ("nova"). Orbit chains resolve
+ * exactly the same way once they are in the chains file, which is what lets
+ * one codebase target One, Nova, and any L3 without a rebuild.
+ */
 export function normalizeNetworkId(raw?: string): Network {
-  if (!raw) return Network.ARBITRUM_SEPOLIA;
+  if (!raw) return DEFAULT_NETWORK;
   const lower = raw.toLowerCase().trim();
+  if (lower === "") return DEFAULT_NETWORK;
 
-  if (Object.values(Network).includes(lower as Network)) return lower as Network;
-  if (NETWORK_ALIASES[lower]) return NETWORK_ALIASES[lower];
+  const hit = resolveNetworkAlias(lower);
+  if (hit) return hit;
 
+  // a well-formed CAIP-2 id we simply don't know about gets a message that
+  // says how to fix it, rather than a bare "unsupported"
+  if (/^eip155:\d+$/.test(lower)) {
+    throw new Error(
+      `unsupported network: ${raw} — add it to arb402.chains.json ` +
+        `(or ARB402_CHAINS_FILE) to register an Orbit chain`
+    );
+  }
   throw new Error(`unsupported network: ${raw}`);
 }
 
 export function toLegacyName(network: Network): string {
-  return LEGACY_NAMES[network] ?? network;
+  return getChain(network)?.legacyName ?? network;
 }
 
-// chain constants
-export const CHAIN_IDS: Record<Network, number> = {
-  [Network.ARBITRUM]: 42161,
-  [Network.ARBITRUM_SEPOLIA]: 421614,
-};
-
-// native USDC on Arbitrum One, test USDC on Sepolia
-const DEFAULT_USDC: Record<Network, `0x${string}`> = {
-  [Network.ARBITRUM]: "0xaf88d065e77c8cC2239327C5EDb3A432268e5831",
-  [Network.ARBITRUM_SEPOLIA]: "0x75faf114eafb1BDbe2F0316DF893fd58CE46AA4d",
-};
-
-// EIP-712 domain values for USDC
-export const USDC_NAME = "USD Coin";
-export const USDC_VERSION = "2";
+/** CAIP-2 id -> numeric chain id, for every registered chain. */
+export const CHAIN_IDS: Record<Network, number> = Object.fromEntries(
+  getRegistry().all.map((c) => [c.id, c.chainId])
+);
 
 export interface NetworkConfig {
   network: Network;
@@ -60,43 +60,86 @@ export interface NetworkConfig {
   chain: Chain;
   rpcUrl: string;
   usdcAddress: `0x${string}`;
+  /** EIP-712 domain name of the settlement token. */
+  tokenName: string;
+  /** EIP-712 domain version of the settlement token. */
+  tokenVersion: string;
+  tokenDecimals: number;
+  /**
+   * False when the chain has no EIP-3009 settlement token configured (Nova
+   * out of the box). Everything else still resolves so the CLI can explain the
+   * gap; settlement is what refuses.
+   */
+  tokenConfigured: boolean;
+  family: ChainFamily;
+  displayName: string;
+  definition: ChainDefinition;
 }
 
-const DEFAULT_RPC: Record<Network, string> = {
-  [Network.ARBITRUM]: "https://arb1.arbitrum.io/rpc",
-  [Network.ARBITRUM_SEPOLIA]: "https://sepolia-rollup.arbitrum.io/rpc",
-};
+const ZERO_ADDRESS = "0x0000000000000000000000000000000000000000" as const;
 
-const VIEM_CHAINS: Record<Network, Chain> = {
-  [Network.ARBITRUM]: arbitrum,
-  [Network.ARBITRUM_SEPOLIA]: arbitrumSepolia,
-};
+/**
+ * Token overrides apply to the *active* network only. Pointing every chain at
+ * one USDC_ADDRESS would be meaningless — and dangerous, since /supported
+ * advertises the inactive chains too.
+ */
+function tokenOverrides(isActive: boolean) {
+  if (!isActive) return {};
+  return {
+    address: process.env.USDC_ADDRESS as `0x${string}` | undefined,
+    name: process.env.USDC_NAME || undefined,
+    version: process.env.USDC_VERSION || undefined,
+  };
+}
 
-function buildNetworkConfig(network: Network): NetworkConfig {
-  const rpcEnv =
-    network === Network.ARBITRUM
-      ? process.env.ARBITRUM_RPC_URL
-      : process.env.ARBITRUM_SEPOLIA_RPC_URL;
+function buildNetworkConfig(def: ChainDefinition, isActive: boolean): NetworkConfig {
+  const rpcUrl = process.env[def.rpcEnvVar] || def.defaultRpcUrl;
+  const override = tokenOverrides(isActive);
 
-  const usdcOverride = process.env.USDC_ADDRESS as `0x${string}` | undefined;
+  const address = override.address || def.token?.address;
+  const token = def.token;
 
   return {
-    network,
-    chainId: CHAIN_IDS[network],
-    chain: VIEM_CHAINS[network],
-    rpcUrl: rpcEnv || DEFAULT_RPC[network],
-    usdcAddress: usdcOverride || DEFAULT_USDC[network],
+    network: def.id,
+    chainId: def.chainId,
+    chain: toViemChain(def, rpcUrl),
+    rpcUrl,
+    usdcAddress: address ?? ZERO_ADDRESS,
+    tokenName: override.name ?? token?.name ?? "USD Coin",
+    tokenVersion: override.version ?? token?.version ?? "2",
+    tokenDecimals: token?.decimals ?? 6,
+    tokenConfigured: address !== undefined,
+    family: def.family,
+    displayName: def.displayName,
+    definition: def,
   };
 }
 
 // resolve active network from env
 const activeNetwork = normalizeNetworkId(process.env.NETWORK);
-export const networkConfig = buildNetworkConfig(activeNetwork);
+const activeDefinition = getChain(activeNetwork)!;
+export const networkConfig = buildNetworkConfig(activeDefinition, true);
 
-// all configs (for /supported)
-export const allNetworkConfigs: NetworkConfig[] = Object.values(Network).map(
-  (n) => buildNetworkConfig(n)
+// every registered chain (for /supported and `arb402 chains`)
+export const allNetworkConfigs: NetworkConfig[] = getRegistry().all.map((def) =>
+  buildNetworkConfig(def, def.id === activeNetwork)
 );
+
+/**
+ * EIP-712 domain of the *active* network's token. Kept as top-level exports for
+ * back-compat; new code should read networkConfig.tokenName/tokenVersion, which
+ * is what makes per-chain domains work.
+ */
+export const USDC_NAME = networkConfig.tokenName;
+export const USDC_VERSION = networkConfig.tokenVersion;
+
+if (!networkConfig.tokenConfigured) {
+  logger.warn(
+    `${activeDefinition.displayName} has no EIP-3009 settlement token configured — ` +
+      `set USDC_ADDRESS (and USDC_NAME/USDC_VERSION if its domain differs). ` +
+      `run 'arb402 doctor' to verify it.`
+  );
+}
 
 // private key
 function loadPrivateKey(): `0x${string}` {

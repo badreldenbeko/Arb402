@@ -2,6 +2,7 @@
   "name": "arb402",
   "version": "0.1.0",
   "description": "HTTP 402 payment facilitator for Arbitrum chains",
+  "license": "MIT",
   "type": "module",
   "main": "dist/server.js",
   "bin": {

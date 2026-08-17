@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 import { readFileSync } from "node:fs";
 import { Command } from "commander";
+import dotenv from "dotenv";
 import { fail } from "./ui.js";
 import { runInit } from "./commands/init.js";
 import { runConfig } from "./commands/config.js";
@@ -16,6 +17,10 @@ import {
   runMerchantSetEnabled,
   runMerchantDelete,
 } from "./commands/merchant.js";
+
+// load .env before any command touches the chain registry, so ARB402_CHAINS_FILE
+// and the RPC overrides are visible even to commands that never import config.ts
+dotenv.config();
 
 const pkg = JSON.parse(
   readFileSync(new URL("../../package.json", import.meta.url), "utf8")
@@ -54,12 +59,15 @@ program
 
 program
   .command("chains")
-  .description("list supported chains and their USDC/RPC settings")
-  .action(action(runChains));
+  .description("list supported chains (One, Nova, Orbit) and their token/RPC settings")
+  .option("--verify", "probe each chain's token on-chain for EIP-3009 support")
+  .action(action((opts) => runChains(opts)));
 
 program
   .command("doctor")
-  .description("run deployment-readiness checks (env, RPC, USDC, database)")
+  .description(
+    "run deployment-readiness checks (env, RPC, settlement token, database)"
+  )
   .action(action(runDoctor));
 
 program

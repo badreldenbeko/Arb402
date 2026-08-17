@@ -9,6 +9,22 @@ export function isDatabaseConfigured(): boolean {
   return !!process.env.DATABASE_URL;
 }
 
+/**
+ * The single trigger for arb402 overriding pg's own TLS resolution.
+ *
+ * `getPool()` acts on this; `sslStatus()` reports on it. They must read the same
+ * function — a diagnostic that re-derives the condition can silently stop
+ * describing what the pool actually did.
+ *
+ * Note the asymmetry with `ssl: undefined`: undefined does not mean "no TLS", it
+ * means "pg decides", from `PGSSLMODE` and the connection string's `sslmode`.
+ * So this flag only ever *downgrades* — it forces unverified TLS over whatever
+ * would otherwise have been negotiated, including a verified connection.
+ */
+export function forcesUnverifiedTls(): boolean {
+  return process.env.PGSSL === "true";
+}
+
 function getPool(): pg.Pool {
   if (!pool) {
     pool = new Pool({
@@ -16,7 +32,7 @@ function getPool(): pg.Pool {
       max: 20,
       idleTimeoutMillis: 30_000,
       connectionTimeoutMillis: 2_000,
-      ssl: process.env.PGSSL === "true" ? { rejectUnauthorized: false } : undefined,
+      ssl: forcesUnverifiedTls() ? { rejectUnauthorized: false } : undefined,
     });
 
     pool.on("error", (err) => {
@@ -50,6 +66,71 @@ export async function withTx<T>(
 export async function testConnection(): Promise<void> {
   const res = await getPool().query("SELECT NOW()");
   logger.info("database connected", { time: res.rows[0].now });
+}
+
+export interface SslStatus {
+  /** Whether the server sees this connection as encrypted. Server-side truth. */
+  encrypted: boolean;
+  version: string | null;
+  cipher: string | null;
+  /**
+   * True when `PGSSL=true` made us pass `rejectUnauthorized: false`, which means
+   * the server certificate was NOT verified. Read from `forcesUnverifiedTls()`,
+   * the same predicate the pool uses.
+   *
+   * When false we passed `ssl: undefined` and pg resolved TLS itself from
+   * `PGSSLMODE` / the connection string's `sslmode` — so verification depends on
+   * that mode and we deliberately don't guess at it here.
+   */
+  forcedUnverified: boolean;
+}
+
+/**
+ * Whether the database connection stays on this machine. Loopback and unix
+ * sockets never touch a network, so an unencrypted one is not an exposure —
+ * which is what keeps the production TLS gate from breaking sidecar and
+ * docker-compose topologies.
+ *
+ * An unparseable URL is reported as remote: the safe direction to be wrong in.
+ */
+export function isLocalDatabase(): boolean {
+  const url = process.env.DATABASE_URL;
+  if (!url) return false;
+
+  try {
+    const u = new URL(url);
+
+    // libpq-style unix socket: postgresql:///db?host=/var/run/postgresql
+    const socket = u.searchParams.get("host");
+    if (socket) return socket.startsWith("/");
+
+    const host = u.hostname;
+    if (!host) return true; // no host at all — a local socket
+    return host === "localhost" || host === "127.0.0.1" || host === "::1" || host === "[::1]";
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Ask the server what it actually negotiated. `pg_stat_ssl` is the only
+ * trustworthy source: the client's own options say what was requested, not what
+ * was agreed. Requires PostgreSQL 9.5+.
+ */
+export async function sslStatus(): Promise<SslStatus> {
+  const res = await query(
+    "SELECT ssl, version, cipher FROM pg_stat_ssl WHERE pid = pg_backend_pid()"
+  );
+  const row = res.rows[0] as
+    | { ssl: boolean; version: string | null; cipher: string | null }
+    | undefined;
+
+  return {
+    encrypted: row?.ssl === true,
+    version: row?.version || null,
+    cipher: row?.cipher || null,
+    forcedUnverified: forcesUnverifiedTls(),
+  };
 }
 
 export async function closePool(): Promise<void> {

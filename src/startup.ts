@@ -1,12 +1,8 @@
-import { parseAbi } from "viem";
 import { networkConfig } from "./config.js";
 import { getPublicClient } from "./settle.js";
+import { probeToken } from "./tokenProbe.js";
 import { testConnection, ensureSchema, isDatabaseConfigured } from "./db.js";
 import { logger } from "./logging.js";
-
-const ERC20_ABI = parseAbi([
-  "function decimals() view returns (uint8)",
-]);
 
 export async function runStartupChecks(): Promise<void> {
   if (isDatabaseConfigured()) {
@@ -32,27 +28,57 @@ export async function runStartupChecks(): Promise<void> {
       `chain ID mismatch: RPC returned ${chainId}, config expects ${networkConfig.chainId}`
     );
   }
-  logger.info("chain ID verified", { chainId });
-  try {
-    const decimals = await pub.readContract({
-      address: networkConfig.usdcAddress,
-      abi: ERC20_ABI,
-      functionName: "decimals",
-    });
-    if (Number(decimals) !== 6) {
-      throw new Error(
-        `expected USDC decimals = 6, got ${decimals} at ${networkConfig.usdcAddress}`
-      );
-    }
-    logger.info("USDC contract verified", {
-      address: networkConfig.usdcAddress,
-      decimals: Number(decimals),
-    });
-  } catch (err: any) {
-    if (err.message.includes("decimals")) throw err;
-    logger.warn("could not verify USDC decimals (contract may not be deployed yet)", {
-      address: networkConfig.usdcAddress,
-      error: err.message,
-    });
+  logger.info("chain ID verified", {
+    chainId,
+    network: networkConfig.displayName,
+    family: networkConfig.family,
+  });
+
+  // A chain can be registered without a settlement token (Arbitrum Nova ships
+  // that way: its bridged USDC.e has no EIP-3009). Refuse to serve rather than
+  // hand out requirements no one can settle.
+  if (!networkConfig.tokenConfigured) {
+    throw new Error(
+      `${networkConfig.displayName} has no settlement token configured — ` +
+        `set USDC_ADDRESS to an EIP-3009-capable token (and USDC_NAME / ` +
+        `USDC_VERSION if its EIP-712 domain differs from "USD Coin" / "2")`
+    );
   }
+
+  await verifyToken();
+}
+
+/**
+ * Verify the settlement token on-chain. EIP-3009 support and a matching EIP-712
+ * domain are load-bearing: without them every signature this facilitator issues
+ * is unredeemable, and nothing on-chain says why. Checked at boot so the
+ * failure lands here rather than mid-settlement.
+ */
+async function verifyToken(): Promise<void> {
+  const probe = await probeToken(getPublicClient(), {
+    address: networkConfig.usdcAddress,
+    chainId: networkConfig.chainId,
+    tokenName: networkConfig.tokenName,
+    tokenVersion: networkConfig.tokenVersion,
+    expectedDecimals: networkConfig.tokenDecimals,
+  });
+
+  for (const w of probe.warnings) {
+    logger.warn(w, { address: networkConfig.usdcAddress });
+  }
+
+  if (probe.problems.length > 0) {
+    throw new Error(
+      `settlement token check failed on ${networkConfig.displayName}:\n  - ` +
+        probe.problems.join("\n  - ")
+    );
+  }
+
+  logger.info("settlement token verified", {
+    address: networkConfig.usdcAddress,
+    symbol: probe.symbol,
+    decimals: probe.decimals,
+    eip3009: true,
+    domainVerified: probe.domainMatches === true,
+  });
 }

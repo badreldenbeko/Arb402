@@ -5,8 +5,6 @@ import {
   SERVICE_FEE_BPS,
   GAS_FEE_USDC,
   MAX_SETTLEMENT_AMOUNT,
-  USDC_NAME,
-  USDC_VERSION,
 } from "./config.js";
 import { verifyTransferAuthorization } from "./eip3009.js";
 import { registerNonce } from "./nonceStore.js";
@@ -125,8 +123,11 @@ export async function verifyPayment(
       },
       { v: payload.payload.v, r: payload.payload.r, s: payload.payload.s },
       networkConfig.usdcAddress,
-      USDC_NAME,
-      USDC_VERSION,
+      // per-chain EIP-712 domain: Orbit tokens and non-Circle deployments do
+      // not all use ("USD Coin", "2"), and a wrong domain recovers a wrong
+      // signer with no on-chain error to explain it
+      networkConfig.tokenName,
+      networkConfig.tokenVersion,
       networkConfig.chainId
     );
 

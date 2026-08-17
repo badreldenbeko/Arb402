@@ -15,10 +15,16 @@ export async function runConfig(): Promise<void> {
   const { networkConfig: n } = cfg;
 
   heading("network");
-  row("network", n.network);
+  row("network", `${n.displayName} (${n.network})`);
   row("chainId", String(n.chainId));
+  row("family", n.family);
   row("rpcUrl", n.rpcUrl);
-  row("usdc", n.usdcAddress);
+  if (n.tokenConfigured) {
+    row("token", n.usdcAddress);
+    row("tokenDomain", `name="${n.tokenName}" version="${n.tokenVersion}"`);
+  } else {
+    row("token", c.yellow("none configured — set USDC_ADDRESS"));
+  }
 
   heading("facilitator");
   if (cfg.FACILITATOR_ADDRESS === ZERO_ADDR) {
@@ -41,5 +47,10 @@ export async function runConfig(): Promise<void> {
   console.log();
   if (cfg.FACILITATOR_ADDRESS === ZERO_ADDR) {
     warn("settlement is disabled until EVM_PRIVATE_KEY is set");
+  }
+  if (!n.tokenConfigured) {
+    warn(
+      `settlement is disabled until USDC_ADDRESS points at an EIP-3009 token on ${n.displayName}`
+    );
   }
 }

@@ -1,13 +1,11 @@
 import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import { resolveNetworkAlias, getChain, knownNetworkNames } from "../../chains.js";
 import { ok, warn, info, die, c } from "../ui.js";
 
 // package root, resolved the same way from src (tsx) and dist (node)
 const PKG_ROOT = fileURLToPath(new URL("../../../", import.meta.url));
-
-// must match the aliases accepted by config.ts (Nova/Orbit arrive with M7)
-const SUPPORTED = ["arbitrum", "arbitrum-one", "arbitrum-sepolia"];
 
 export interface InitOptions {
   network?: string;
@@ -26,17 +24,34 @@ export function runInit(opts: InitOptions): void {
   }
 
   let contents = readFileSync(template, "utf8");
+  let tokenWarning: string | undefined;
 
   if (opts.network) {
-    const net = opts.network.toLowerCase().trim();
-    if (!SUPPORTED.includes(net) && !net.startsWith("eip155:")) {
+    // resolved against the live registry, so One, Nova, and any Orbit chain in
+    // arb402.chains.json are all accepted by the same path
+    const id = resolveNetworkAlias(opts.network);
+    if (!id) {
       die(
-        `unsupported network "${opts.network}" — expected one of ${SUPPORTED.join(
-          ", "
-        )} or a CAIP-2 id (eip155:<chainId>)`
+        `unsupported network "${opts.network}"\n` +
+          `  known networks: ${knownNetworkNames().join(", ")}\n` +
+          `  Orbit chains: add them to arb402.chains.json (see arb402.chains.example.json)`
       );
     }
-    contents = contents.replace(/^NETWORK=.*$/m, `NETWORK=${net}`);
+    const def = getChain(id)!;
+    // echo back the form the user asked for: a CAIP-2 id stays CAIP-2, an
+    // alias is canonicalised to the chain's slug
+    const written = /^eip155:\d+$/i.test(opts.network.trim())
+      ? def.id
+      : def.legacyName;
+    contents = contents.replace(/^NETWORK=.*$/m, `NETWORK=${written}`);
+
+    if (!def.token) {
+      // Nova is the live case: no bridged token on it implements EIP-3009, so
+      // the operator must supply one before anything can settle.
+      tokenWarning =
+        `${def.displayName} has no default settlement token — set ` +
+        `${c.bold("USDC_ADDRESS")} to an EIP-3009-capable token in .env`;
+    }
   }
 
   writeFileSync(target, contents);
@@ -44,7 +59,15 @@ export function runInit(opts: InitOptions): void {
 
   info("next steps:");
   console.log(`    1. set ${c.bold("EVM_PRIVATE_KEY")} in .env (facilitator wallet)`);
-  console.log(`    2. run ${c.bold("arb402 doctor")} to verify configuration`);
-  console.log(`    3. run ${c.bold("arb402 dev")} to start the facilitator`);
+  if (tokenWarning) {
+    console.log(`    2. set ${c.bold("USDC_ADDRESS")} (see below)`);
+    console.log(`    3. run ${c.bold("arb402 doctor")} to verify configuration`);
+    console.log(`    4. run ${c.bold("arb402 dev")} to start the facilitator`);
+  } else {
+    console.log(`    2. run ${c.bold("arb402 doctor")} to verify configuration`);
+    console.log(`    3. run ${c.bold("arb402 dev")} to start the facilitator`);
+  }
+
+  if (tokenWarning) warn(tokenWarning);
   warn("never commit .env — it holds your facilitator private key");
 }
